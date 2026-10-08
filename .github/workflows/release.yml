@@ -1,0 +1,73 @@
+name: Windows release
+on:
+  push:
+    tags: [v*]
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Check release version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(\d+\.\d+\.\d+)$') { throw 'Expected vMAJOR.MINOR.PATCH tag' }
+          $version = $Matches[1]
+          $metadata = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
+          foreach ($package in $metadata.packages) {
+            if ($package.version -ne $version) { throw 'Tag and Cargo versions differ' }
+          }
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+      - name: Prepare Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build Windows x64
+        run: cargo build --workspace --release --locked --target x86_64-pc-windows-msvc
+      - name: Package
+        shell: pwsh
+        run: ./scripts/package.ps1 -Version $env:RELEASE_VERSION -BinaryDirectory target/x86_64-pc-windows-msvc/release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-release
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: windows-release
+          path: release
+      - name: Attest packaged binaries
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: release/*.zip
+      - name: Publish experimental release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" release/*.zip release/SHA256SUMS.txt --verify-tag --prerelease --title "Magic Scroll for Windows $RELEASE_TAG" --notes-file release/RELEASE_NOTES.md

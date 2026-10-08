@@ -1,0 +1,11 @@
+/target/
+/dist/
+*.state.json
+*.pending.json
+*.sys
+*.cat
+*.pkg
+*.dmg
+*.exe
+*.dll
+/driver-download/

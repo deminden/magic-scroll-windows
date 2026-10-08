@@ -1,0 +1,24 @@
+[workspace]
+members = ["crates/app", "crates/setup"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Denis Demin"]
+homepage = "https://github.com/deminden"
+repository = "https://github.com/deminden/magic-scroll-windows"
+rust-version = "1.88"
+
+[workspace.dependencies]
+windows-sys = { version = "=0.59.0", default-features = false }
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

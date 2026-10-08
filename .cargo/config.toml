@@ -1,0 +1,3 @@
+# Published MSVC executables need no separate Visual C++ runtime installation.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
