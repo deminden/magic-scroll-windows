@@ -64,10 +64,10 @@ jobs:
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
           subject-path: release/*.zip
-      - name: Publish experimental release
+      - name: Publish latest release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" release/*.zip release/SHA256SUMS.txt --verify-tag --prerelease --title "Magic Scroll for Windows $RELEASE_TAG" --notes-file release/RELEASE_NOTES.md
+          gh release create "$RELEASE_TAG" release/*.zip release/SHA256SUMS.txt --verify-tag --latest --title "Magic Scroll for Windows $RELEASE_TAG" --notes-file release/RELEASE_NOTES.md

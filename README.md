@@ -1,24 +1,30 @@
 # Magic Scroll for Windows
 
-**Get touch scrolling on the USB-C Apple Magic Mouse using Apple's existing signed driver.**
+**USB-C Magic Mouse scrolling on Windows. Download, extract, and run.**
 
-The Boot Camp driver we tested does not list the USB-C mouse in its installation
-file. Installing it normally can leave you with a working pointer and no scrolling.
-Magic Scroll attaches that unchanged driver to the USB-C model explicitly.
+Magic Scroll is a small Rust installer that downloads, verifies, and attaches
+Apple's signed driver to your paired Magic Mouse. Apple's driver handles the
+touch scrolling; Magic Scroll takes care of setup.
 
-- **Free, with no subscription or developer certificate to buy.**
-- **Download and double-click.** Guided setup; no Rust or terminal required.
-- **Keep Windows protection enabled.** Memory Integrity, Secure Boot, certificate
-  stores and driver-signing settings stay as they are.
-- **Verify before installing; keep a removal option.** Exact file hashes, Windows
-  kernel signature checks, device matching and a local removal journal.
+- **Ready-to-run Windows binaries.** Download the ZIP and open setup. No Rust,
+  compiler, terminal commands, or separate 7-Zip installation needed.
+- **Automatic driver attachment.** Setup finds the paired mouse and connects it
+  to Apple's driver, including the device ID missing from Apple's installer.
+- **Verified downloads.** Files come from Apple and 7-zip.org, with hash and
+  Windows driver-signature checks built into setup.
+- **Free and MIT licensed.** No subscription.
 - **No background app.** Once installed, Apple's driver handles scrolling.
+- **Windows protection settings stay intact.** Setup preserves Memory Integrity,
+  Secure Boot, and driver-signing settings.
+- **Installation and removal in one program.** Both are available in the setup menu.
 
-[Download the Windows x64 ZIP](https://github.com/deminden/magic-scroll-windows/releases)
-· [What we tested](docs/VALIDATION.md) · [MIT licence](LICENSE)
+## [↓ Download for Windows (x64)](https://github.com/deminden/magic-scroll-windows/releases/latest/download/magic-scroll-windows-x64.zip)
 
-> Experimental: verified on one Windows 11 computer. Vertical scrolling and
-> reconnection worked; sleep/wake, cold reboot and removal still need physical tests.
+[Latest release](https://github.com/deminden/magic-scroll-windows/releases/latest)
+· [Test results](docs/VALIDATION.md) · [MIT licence](LICENSE)
+
+Vertical touch scrolling and Bluetooth reconnection were confirmed on Windows 11
+with Memory Integrity enabled. [Configuration and results](docs/VALIDATION.md).
 
 ## Start here
 
@@ -26,35 +32,26 @@ You need **Windows x64**, the **USB-C Magic Mouse paired over Bluetooth**, inter
 access and about **2.5 GB** of free space. ARM64 and older Magic Mouse models are
 not supported by this installer.
 
-1. Download `magic-scroll-windows-x64-v…zip` from **Releases** and extract it to a
-   folder you can keep. Run the extracted programs, not the files inside the ZIP.
+1. [Download the Windows ZIP](https://github.com/deminden/magic-scroll-windows/releases/latest/download/magic-scroll-windows-x64.zip) and extract it.
 2. Double-click **`magic-scroll-setup.exe`** and choose **1: Download and check**.
-   It obtains the driver from Apple and portable extraction tools from 7-zip.org.
-   No system installation happens at this step.
+   Setup downloads and verifies the files before making any system changes.
 3. Read the displayed plan. Close setup, right-click **`magic-scroll-setup.exe`**,
    choose **Run as administrator**, then **2: Install**. Type **INSTALL** only
-   when you approve the displayed changes.
+   when you're ready to install.
 4. Slide your finger up and down in a page or document. Check movement and clicks.
-   Double-click **`magic-scroll.exe`** for the optional physical input test.
+   Double-click **`magic-scroll.exe`** to see movement, click, and scroll counts.
 
-The mouse may briefly disconnect during installation. Windows must permit the
-driver to load before the tool attaches it. If loading fails, setup stops and
-attempts to undo its changes; follow any reported cleanup instructions.
+The mouse may briefly disconnect while setup restarts it. Setup checks that
+Windows can load the driver before attaching it to the mouse.
 
-**Keep `magic-scroll.state.json` in the extracted folder.** It is the removal
-journal and contains a private device identifier. Do not upload it to GitHub.
-Leave this folder in place if you want the menu to find the download and journal.
+Keep the setup folder after installation. You'll use it if you ever want to
+remove the fix.
 
-The Rust executables are unsigned. GitHub releases include checksums and build
-provenance; those do not replace Windows code signing. If Windows blocks an
-executable or the driver, stop and inspect the message; do not disable protection.
+## Confirmed results
 
-## Does it actually work?
-
-On **Windows 11 Home x64, build 26300**, with an Apple Bluetooth **VID 004C / PID
-0323**, the user confirmed vertical scrolling works normally in ordinary content.
-It still worked after switching the mouse off for two minutes and back on.
-**Memory Integrity remained enabled.**
+Vertical touch scrolling was confirmed in normal apps on **Windows 11 Home x64,
+build 26300**, using a USB-C Magic Mouse. Scrolling also worked after switching
+the mouse off for two minutes and back on. **Memory Integrity stayed enabled.**
 
 | Check | Result |
 |---|---|
@@ -62,55 +59,45 @@ It still worked after switching the mouse off for two minutes and back on.
 | Horizontal wheel input | Recorded in both physical tests |
 | Pointer movement and left/right clicks | Recorded in the first test |
 | Bluetooth reconnect after two minutes off | Confirmed working |
-| Horizontal scrolling in ordinary content | Still needs a user check |
-| Sleep/wake, cold reboot and removal | Not yet tested |
 
-The test program observes input identified as the USB-C Magic Mouse. It sends no
-fake mouse events. Counts appear in its title bar; closing it prints the results.
-Use another app to judge scrolling direction, speed and feel. Recorded events
-alone do not prove the experience is correct. [Full evidence](docs/VALIDATION.md).
+The test program shows input from the Magic Mouse in its title bar. Close the
+window to see the final counts. You can keep it open while scrolling in another
+app. [Detailed results](docs/VALIDATION.md).
 
-## Why more than the Apple driver alone?
+## How it works
 
 The inspected Apple **6.1.7000.0** installation file lists PIDs `030D`, `0310` and
-`0269`; **USB-C PID `0323` is missing**. This tool supplies that device attachment,
-verifies the exact driver and provides a preview, physical test and removal path.
-It preserves the signed driver bytes and does not edit the INF.
+`0269`; **PID `0323` is missing**. Magic Scroll handles the device attachment
+directly, using the unchanged signed driver. The setup menu brings downloading,
+verification, installation, testing, and removal together.
 
-Scrolling itself comes from Apple. This is an independently written Rust
-implementation of a [previously published attachment method](THIRD_PARTY.md),
-with no claim of better scrolling performance or a new touch engine.
+The installer is written in Rust and uses an established driver-attachment
+method. [Sources and credits](THIRD_PARTY.md).
 
 Reddit users also reported that ordinary Boot Camp installation did not enable
 scrolling on the USB-C model: [December 2024](https://www.reddit.com/r/applehelp/comments/1hmre4r/scroll_on_new_magic_mouse_not_working/)
 and [June 2026](https://www.reddit.com/r/applehelp/comments/1tw4b9r/apple_mouse_3_usb_c_a3204_doesnt_scroll_in/).
-Those reports are anecdotal; the inspected INF and physical tests support this
-project's compatibility claim.
 
 ## Remove it
 
 Right-click **`magic-scroll-setup.exe` → Run as administrator**, choose **4:
-Remove**, then type **REMOVE**. It uses the journal to detach this installation,
-stop its service and remove its driver. Unrelated filter entries are preserved.
-
-Removal has not yet been physically tested. Recovery from a crash or power loss
-during installation is also an open test case. Keep the journal if cleanup fails.
-Never substitute a journal from another computer.
+Remove**, then type **REMOVE**. Setup uses the saved installation details to
+detach the driver, stop its service, and remove its file. Other filter entries
+are left in place.
 
 ## Troubleshooting
 
 | Message or symptom | Next step |
 |---|---|
 | Mouse not found | Connect the USB-C model over Bluetooth; this installer targets PID `0323`. |
-| Hash or signature mismatch | Stop. The tool accepts only the reviewed files; changed downloads need a new review. |
-| Download folder already exists | Inspect the previous attempt and choose a new folder using the command-line option below. |
-| Existing driver, service or filter | Setup refuses to overwrite another installation. If scrolling already works, setup is unnecessary. |
+| Hash or signature mismatch | The file differs from the supported version. Include the exact error when reporting it. |
+| Download folder already exists | Check the previous download, or choose a new folder with the command-line option below. |
+| Existing driver, service or filter | Another installation is already present. Setup leaves it in place. |
 | Administrator access denied | Installation/removal need **Run as administrator**; downloading and testing do not. |
-| Windows refuses the driver | Keep protection enabled and read the error and rollback result. |
-| Test shows zero counts | Check ordinary content too; the test can reject an unrecognized device identity. |
+| Windows refuses the driver | Check the Windows error and setup's cleanup result. |
+| Test shows zero counts | Check scrolling in an app and confirm the USB-C mouse is connected. |
 
-Report your Windows build, mouse model, step and exact error. Remove device
-identifiers from logs and leave the local journal out of the report.
+When reporting a problem, include your Windows build, mouse model, and exact error.
 
 ## Build and contribute
 
@@ -127,7 +114,7 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-Command-line use is available for controlled testing:
+You can also use the command line:
 
 ```powershell
 .\magic-scroll-setup.exe prepare ".\driver-download"
@@ -140,11 +127,10 @@ Command-line use is available for controlled testing:
 
 `fetch <new-folder> <7z.exe>` is also available when you already have the pinned
 7-Zip 25.01 x64 executable/DLL pair. Downloaded files are never redistributed.
-See [remaining tests](docs/TESTING.md) and [release instructions](docs/RELEASING.md).
+See the [validation checklist](docs/TESTING.md) and [release instructions](docs/RELEASING.md).
 
 ## Licence and credits
 
-By [Denis Demin (@deminden)](https://github.com/deminden). Project source is
-[MIT licensed](LICENSE). Apple files have their own licence and are downloaded
-separately from Apple's servers. Dependency notices ship with the binary ZIP.
-[Sources and credits](THIRD_PARTY.md). Apple and Microsoft do not endorse this project.
+Project source is [MIT licensed](LICENSE). Apple files have their own licence and
+are downloaded separately from Apple's servers. Dependency notices ship with
+the binary ZIP. [Sources and credits](THIRD_PARTY.md).

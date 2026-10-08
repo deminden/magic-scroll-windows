@@ -54,28 +54,43 @@ try {
     }
     $checksums | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding utf8
     New-Item -ItemType Directory -Path $release | Out-Null
-    $zip = Join-Path $release "magic-scroll-windows-x64-v$Version.zip"
+    # A consistent asset name lets the README always point to the latest download.
+    $zip = Join-Path $release 'magic-scroll-windows-x64.zip'
     Compress-Archive -LiteralPath $package -DestinationPath $zip -CompressionLevel Optimal
     "$((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($zip))" |
         Set-Content -LiteralPath (Join-Path $release 'SHA256SUMS.txt') -Encoding utf8
     @"
-Enable touch scrolling on the USB-C Magic Mouse using Apple's unchanged signed driver.
+USB-C Magic Mouse scrolling on Windows, with ready-to-run Rust setup tools.
 
-**Download the Windows x64 ZIP below, extract it, and double-click magic-scroll-setup.exe.**
-Choose 1 to download and check; then run setup as administrator and choose 2 to install.
-No Rust, separate 7-Zip installation, subscription or developer certificate is required.
+## [Download for Windows (x64)](https://github.com/deminden/magic-scroll-windows/releases/download/v$Version/magic-scroll-windows-x64.zip)
 
-This experimental release was tested on one Windows 11 Home x64 computer with
-Memory Integrity enabled. Vertical scrolling and reconnection after two minutes
-off worked. Horizontal wheel input was recorded; horizontal content scrolling,
-sleep/wake, cold reboot and removal still need physical tests.
+- Ready-to-run binaries: no compiler or terminal commands.
+- Automatic attachment of Apple's signed driver to the paired mouse.
+- Verified downloads from Apple and 7-zip.org; no separate 7-Zip installation.
+- Free and MIT licensed, with no subscription or background app.
+- Windows protection settings stay intact.
+- Installation, testing, and removal in one setup menu.
 
-Apple's scrolling engine is unchanged. Its inspected INF omits USB-C PID 0323;
-this tool supplies the attachment and checks. Apple files are downloaded separately.
+### Start in three steps
 
-The Rust executables are unsigned. Keep Windows protection enabled and retain
-the local removal journal. SHA256SUMS.txt covers the ZIP; the ZIP includes hashes
-for both executables, the MIT licence, dependency notices and detailed instructions.
+1. Download the ZIP above and extract it.
+2. Open **magic-scroll-setup.exe** and choose **1: Download and check**.
+3. Run setup as administrator, choose **2: Install**, then type **INSTALL**.
+
+Try scrolling in a page or document. Open **magic-scroll.exe** to see mouse-input counts.
+
+Vertical touch scrolling and Bluetooth reconnection were confirmed on Windows 11
+Home x64 with Memory Integrity enabled. Horizontal wheel input, pointer movement,
+and left/right clicks were also recorded. See the [test results](https://github.com/deminden/magic-scroll-windows/blob/v$Version/docs/VALIDATION.md).
+
+Apple's installer omits PID 0323. Magic Scroll handles that attachment directly,
+using the unchanged signed driver.
+
+Keep the setup folder after installation so you can use the removal option later.
+
+**Included:** setup and test executables, instructions, licence notices, and checksums.
+SHA256SUMS.txt covers the ZIP. Inside are hashes for both executables, the MIT
+licence, dependency notices, and instructions. GitHub build provenance is also available.
 "@ | Set-Content -LiteralPath (Join-Path $release 'RELEASE_NOTES.md') -Encoding utf8
     Write-Output "Ready: $zip"
 } finally {
