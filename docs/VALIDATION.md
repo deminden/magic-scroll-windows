@@ -26,6 +26,10 @@ Date: 2026-10-08. These are development observations, not a stable-release claim
 | Real system rollback | **Not tested** |
 
 A user-approved installation was performed. No security settings were changed.
+The physical results below were collected before the final guided-menu and
+Windows-binding refactor. The final package has build, lint, unit, command-line
+and download-verification checks; its complete guided installation and removal
+have not been repeated on the hardware.
 The physical test counts only device-identified Apple PID 0323 Raw Input events;
 no synthetic input was sent. The user confirmed vertical scrolling works normally in ordinary content.
 Horizontal content behavior and longer-term reliability remain
