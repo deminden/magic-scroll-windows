@@ -244,7 +244,8 @@ fn file_hash(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-fn download(path: &Path, url: &str, hash: &str) -> Result<()> {
+// Return a read lock so the bytes verified here cannot change before use.
+fn download(path: &Path, url: &str, hash: &str) -> Result<File> {
     let status = std::process::Command::new(system_dir()?.join("curl.exe"))
         .args([
             "--fail",
@@ -268,12 +269,13 @@ fn download(path: &Path, url: &str, hash: &str) -> Result<()> {
             "Download failed; partial files were retained for inspection",
         ));
     }
+    let locked = OpenOptions::new().read(true).share_mode(1).open(path)?;
     if file_hash(path)? != hash {
         return Err(fail(
             "Download integrity mismatch; execution and extraction refused",
         ));
     }
-    Ok(())
+    Ok(locked)
 }
 
 /// Bootstrap an audited portable extractor without installing 7-Zip system-wide.
@@ -284,21 +286,16 @@ pub fn prepare(folder: &Path) -> Result<()> {
     let bootstrap = folder.join("7zr.exe");
     let archive = folder.join("7z-setup.exe");
     println!("Downloading verified portable 7-Zip tools from 7-zip.org. No system installation.");
-    download(
+    let _bootstrap_lock = download(
         &bootstrap,
         "https://www.7-zip.org/a/7zr.exe",
         "256feca8e274e5da655e2a284fabafd9f554365eb164862089dacd4e8276d282",
     )?;
-    download(
+    let _archive_lock = download(
         &archive,
         "https://www.7-zip.org/a/7z2501-x64.exe",
         "78afa2a1c773caf3cf7edf62f857d2a8a5da55fb0fff5da416074c0d28b2b55f",
     )?;
-    // Deny writes/deletion of the verified executable until its process exits.
-    let _locked = OpenOptions::new()
-        .read(true)
-        .share_mode(1)
-        .open(&bootstrap)?;
     let tools = folder.join("tools");
     std::fs::create_dir(&tools)?;
     let status = std::process::Command::new(&bootstrap)
@@ -337,7 +334,7 @@ pub fn fetch(folder: &Path, extractor: &Path) -> Result<()> {
     let package = folder.join("BootCampESD.pkg");
     let url="https://swcdn.apple.com/content/downloads/23/15/041-91731-A_LBI7Q8UWOG/juk1ng0hm623gxh3jv4qxt190ga1h5p0lw/BootCampESD.pkg";
     println!("Downloading 548 MB from Apple's HTTPS server into a new local folder. Apple's software licence applies.");
-    download(
+    let _package_lock = download(
         &package,
         url,
         "d655289ac44a00d3abc20d01134acf7b38aad2ad98bb3c46c9da4c12e1f28d85",
