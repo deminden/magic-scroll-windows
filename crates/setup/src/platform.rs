@@ -303,7 +303,7 @@ fn audit(path: &Path) -> Result<Audited> {
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    let hash = format!("{:x}", Sha256::digest(&bytes));
+    let hash = hex_hash(&Sha256::digest(&bytes));
     if hash != HASH {
         return Err(fail(format!(
             "Unsupported or modified driver SHA-256: {hash}"
@@ -323,6 +323,12 @@ fn audit(path: &Path) -> Result<Audited> {
     })
 }
 
+// Digest 0.11 returns a byte array without LowerHex; keep the pinned hash
+// format unchanged, including two lowercase digits for every byte.
+fn hex_hash(hash: &[u8]) -> String {
+    hash.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn file_hash(path: &Path) -> Result<String> {
     let mut file = OpenOptions::new().read(true).share_mode(1).open(path)?;
     let mut hash = Sha256::new();
@@ -334,7 +340,7 @@ fn file_hash(path: &Path) -> Result<String> {
         }
         hash.update(&bytes[..n]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hex_hash(&hash.finalize()))
 }
 
 // Return a read lock so the bytes verified here cannot change before use.
@@ -1552,6 +1558,23 @@ pub fn rollback(journal: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sha256_hex_preserves_standard_vectors_and_zero_padding() {
+        assert_eq!(hex_hash(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
+        for (input, expected) in [
+            (
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                "abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+        ] {
+            assert_eq!(hex_hash(&Sha256::digest(input.as_bytes())), expected);
+        }
+    }
+
     #[test]
     fn administrator_options_indicate_effective_privileges() {
         let (elevated, elevated_color) = administrator_option(2, "Install", true);
