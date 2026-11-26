@@ -3,13 +3,14 @@
 Push a version tag matching `[workspace.package].version` in `Cargo.toml`:
 
 ```text
-git tag v0.1.1
-git push origin v0.1.1
+git tag -a v0.1.2 -m "Magic Scroll for Windows v0.1.2"
+git push origin v0.1.2
 ```
 
 The release workflow tests and builds Windows x64 MSVC binaries, packages their
 licence notices, generates SHA-256 checksums and build provenance, then publishes
-a GitHub release marked **Latest**. The Windows ZIP uses the same asset name in
+a GitHub release marked **Latest**, with download instructions and an automatically
+generated list of merged changes. The Windows ZIP uses the same asset name in
 every release, so the README's direct download link always works. No Apple driver,
 download cache or device journal goes into the release. Ordinary pushes and pull
 requests run checks only.
@@ -25,7 +26,7 @@ and release a new tag.
 To create the same package locally after a release build:
 
 ```powershell
-.\scripts\package.ps1 -Version 0.1.1 -BinaryDirectory target\release
+.\scripts\package.ps1 -Version 0.1.2 -BinaryDirectory target\release
 ```
 
 Files appear in `dist/release`. The script refuses to overwrite an existing

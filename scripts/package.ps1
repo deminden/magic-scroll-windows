@@ -65,23 +65,32 @@ USB-C Magic Mouse scrolling on Windows, with ready-to-run Rust setup tools.
 ## [Download for Windows (x64)](https://github.com/deminden/magic-scroll-windows/releases/download/v$Version/magic-scroll-windows-x64.zip)
 
 - Ready-to-run binaries: no compiler or terminal commands.
-- Automatic attachment of Apple's signed driver to the paired mouse.
+- Choose one or all paired USB-C Magic Mice for Apple's signed driver.
 - Verified downloads from Apple and 7-zip.org; no separate 7-Zip installation.
 - Free and MIT licensed, with no subscription or background app.
 - Windows protection settings stay intact.
-- Installation, testing, and removal in one setup menu.
+- Installation, testing, and individual mouse removal in one setup menu.
+- Reuse an existing verified driver and service without another download.
 
 ### Start in three steps
 
 1. Download the ZIP above and extract it.
 2. Open **magic-scroll-setup.exe** and choose **1: Download and check**.
-3. Run setup as administrator, choose **2: Install**, then type **INSTALL**.
+3. Run setup as administrator, choose **2: Install**, select one mouse or all eligible mice, review the plan, then type **INSTALL**.
 
 Try scrolling in a page or document. Open **magic-scroll.exe** to see mouse-input counts.
 
-Vertical touch scrolling and Bluetooth reconnection were confirmed on Windows 11
-Home x64 with Memory Integrity enabled. Horizontal wheel input, pointer movement,
-and left/right clicks were also recorded. See the [test results](https://github.com/deminden/magic-scroll-windows/blob/v$Version/docs/VALIDATION.md).
+Vertical touch scrolling was confirmed on Windows 11 Home x64 with Memory Integrity
+enabled. Horizontal wheel input, pointer movement, and left/right clicks were also
+recorded. See the [test results](https://github.com/deminden/magic-scroll-windows/blob/v$Version/docs/VALIDATION.md).
+
+### Known issue
+
+Some systems lose scrolling or fail to reconnect after installation or switching
+the mouse off/on. Driver removal can also fail with error 1052. These remain open
+in [#7](https://github.com/deminden/magic-scroll-windows/issues/7); this release
+does not fix them. The separate removal failure caused by Windows' service-path
+prefix is fixed.
 
 Apple's installer omits PID 0323. Magic Scroll handles that attachment directly,
 using the unchanged signed driver.

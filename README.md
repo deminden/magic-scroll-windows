@@ -23,8 +23,9 @@ touch scrolling; Magic Scroll takes care of setup.
 [Latest release](https://github.com/deminden/magic-scroll-windows/releases/latest)
 · [Test results](docs/VALIDATION.md) · [MIT licence](LICENSE)
 
-Vertical touch scrolling and Bluetooth reconnection were confirmed on Windows 11
-with Memory Integrity enabled. [Configuration and results](docs/VALIDATION.md).
+Vertical touch scrolling was confirmed on Windows 11 with Memory Integrity enabled.
+Reconnect problems remain open on some systems; see [known issues](#known-issues).
+[Configuration and results](docs/VALIDATION.md).
 
 ## Start here
 
@@ -68,8 +69,8 @@ without the original journal, after checking the exact driver and service path.
 Existing attachments are shown but never claimed by the new journal. A reused
 driver and service are treated as externally owned, even if they were installed
 by an earlier copy of Magic Scroll; keep that copy's journal too. Multi-mouse
-installation, disconnected device entries, and their removal require physical
-testing; the confirmed results below cover only one mouse. After adding a mouse,
+support was tested by the contributor with two USB-C mice on two Windows PCs;
+the detailed input counts below cover one mouse. After adding a mouse,
 use the updated setup program for removal; older versions cannot read the
 multi-mouse journal.
 
@@ -119,6 +120,14 @@ Each setup folder can remove only attachments recorded in its own journal.
 Remove all leaves a reused external service and driver, other mouse attachments,
 and unrelated filter entries in place. Setup refuses to remove owned shared
 components while another matching mouse still uses them.
+
+## Known issues
+
+Scrolling can stop after switching the mouse off/on, and some systems fail to
+reconnect after installation. Removal can also fail with error `1052` when the
+driver cannot stop. These are tracked in [#7](https://github.com/deminden/magic-scroll-windows/issues/7).
+Version 0.1.2 fixes the separate service-path comparison error during removal;
+it does not resolve these connection or driver-stop problems.
 
 ## Troubleshooting
 

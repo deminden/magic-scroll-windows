@@ -42,3 +42,22 @@ cover the remaining hardware validation.
 Second physical test: 331 movement events, 1 left click, 84 vertical wheel events,
 and 86 horizontal wheel events. Scrolling after two minutes off and back on
 was confirmed, completing the initial Bluetooth reconnect check.
+
+## Version 0.1.2 — 26 November 2026
+
+The merged source passed 22 native Windows unit tests, formatting, Clippy with
+warnings denied, and a release build. GitHub checks also passed on Windows with
+stable Rust and Rust 1.88, and on Ubuntu. The tests include multi-mouse journal
+migration, shared-driver ownership, service-path matching, and SHA-256 formatting.
+
+The contributor of [#8](https://github.com/deminden/magic-scroll-windows/pull/8)
+reported testing multi-mouse support with two USB-C mice on two Windows PCs.
+The input counts above are from the original single-mouse test, not a new physical
+test of this release.
+
+Later testing found scrolling could fail after switching the mouse off/on.
+[#7](https://github.com/deminden/magic-scroll-windows/issues/7) also reports a
+disconnect after installation and removal error `1052`. Those problems remain
+open. Version 0.1.2 fixes the separate removal check that rejected Windows' NT
+service-path prefix; the original reconnect result does not establish reliability
+across repeated reconnects or different Bluetooth adapters.
