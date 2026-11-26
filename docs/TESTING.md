@@ -14,6 +14,16 @@ reconnect on one Windows 11 machine. Still check:
 - Horizontal scrolling in ordinary content, speed and direction.
 - 30+ minutes idle, sleep/wake and cold reboot.
 - Rollback and restoration of native movement/clicks.
+- Multiple paired mice: select one and add another later; install all; reconnect
+  a disconnected selected mouse; remove one and verify the other still scrolls;
+  remove all and verify both still move and click. Remove the last recorded mouse
+  individually, then use Remove all to clean up owned shared components.
+- Upgrade a previous single-mouse journal, and exercise failures and rollback
+  while adding a mouse without disturbing existing attachments.
+- Reuse a verified pre-existing driver without its journal, including with no
+  local download; remove the new attachment and confirm the original service,
+  driver, and pre-existing mouse attachments remain intact. Reject mismatched
+  or incomplete services and driver files.
 
 Use disposable test machines for installer failures: missing administrator access,
 existing files/services/filters, wrong hashes or signatures, driver-load refusal,

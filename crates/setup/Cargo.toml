@@ -21,8 +21,10 @@ workspace = true
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Security",
     "Win32_Security_Cryptography",
     "Win32_Security_WinTrust",
+    "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     "Win32_System_Services",
