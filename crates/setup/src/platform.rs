@@ -8,7 +8,7 @@ use std::{
     error::Error,
     ffi::c_void,
     fs::{File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     mem::{size_of, zeroed},
     os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
     path::{Path, PathBuf},
@@ -24,8 +24,15 @@ use windows_sys::{
             SPDRP_LOWERFILTERS, SP_DEVINFO_DATA as DevInfo,
         },
         Foundation::{FreeLibrary, HANDLE as Handle},
-        Security::WinTrust::*,
+        Security::{
+            CheckTokenMembership, CreateWellKnownSid, WinBuiltinAdministratorsSid, WinTrust::*,
+            SECURITY_MAX_SID_SIZE,
+        },
         System::{
+            Console::{
+                GetConsoleScreenBufferInfo, SetConsoleTextAttribute, CONSOLE_SCREEN_BUFFER_INFO,
+                FOREGROUND_BLUE, FOREGROUND_GREEN, FOREGROUND_INTENSITY, FOREGROUND_RED,
+            },
             LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32},
             Services::{
                 CloseServiceHandle, ControlService, CreateServiceW, DeleteService, OpenSCManagerW,
@@ -40,6 +47,92 @@ use windows_sys::{
     },
 };
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+fn download_option(downloaded: bool) -> (String, u16) {
+    let (status, foreground) = if downloaded {
+        ("downloaded", FOREGROUND_GREEN)
+    } else {
+        ("not downloaded", FOREGROUND_RED)
+    };
+    (
+        format!("1. Download and check (no administrator rights needed) [{status}]"),
+        foreground,
+    )
+}
+
+pub fn print_download_option(downloaded: bool) -> Result<()> {
+    let (text, foreground) = download_option(downloaded);
+    print_colored_line(&text, foreground)
+}
+
+pub fn is_administrator() -> Result<bool> {
+    let mut sid = [0u32; SECURITY_MAX_SID_SIZE as usize / size_of::<u32>()];
+    let mut size = SECURITY_MAX_SID_SIZE;
+    if unsafe {
+        CreateWellKnownSid(
+            WinBuiltinAdministratorsSid,
+            null_mut(),
+            sid.as_mut_ptr().cast(),
+            &mut size,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error().into());
+    }
+    let mut member = 0;
+    if unsafe { CheckTokenMembership(null_mut(), sid.as_mut_ptr().cast(), &mut member) } == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(member != 0)
+}
+
+fn administrator_option(number: u8, label: &str, administrator: bool) -> (String, u16) {
+    let (status, color) = if administrator {
+        ("running as administrator", FOREGROUND_GREEN)
+    } else {
+        ("not running as administrator", FOREGROUND_RED)
+    };
+    (format!("{number}. {label} [{status}]"), color)
+}
+
+pub fn print_administrator_option(number: u8, label: &str, administrator: bool) -> Result<()> {
+    let (text, color) = administrator_option(number, label, administrator);
+    print_colored_line(&text, color)
+}
+
+pub fn print_cyan_option(text: &str) -> Result<()> {
+    print_colored_line(text, FOREGROUND_GREEN | FOREGROUND_BLUE)
+}
+
+fn print_colored_line(text: &str, foreground: u16) -> Result<()> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    if !stdout.is_terminal() {
+        writeln!(output, "{text}")?;
+        return Ok(());
+    }
+
+    let handle = stdout.as_raw_handle() as Handle;
+    let mut info: CONSOLE_SCREEN_BUFFER_INFO = unsafe { zeroed() };
+    if unsafe { GetConsoleScreenBufferInfo(handle, &mut info) } == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let color = (info.wAttributes
+        & !(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY))
+        | foreground
+        | FOREGROUND_INTENSITY;
+    if unsafe { SetConsoleTextAttribute(handle, color) } == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let result = writeln!(output, "{text}").and_then(|()| output.flush());
+    let restored = unsafe { SetConsoleTextAttribute(handle, info.wAttributes) };
+    if restored == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    result?;
+    Ok(())
+}
+
 struct TrustLibrary {
     module: Handle,
     verify: unsafe extern "system" fn(Handle, *mut GUID, *mut c_void) -> i32,
@@ -398,21 +491,23 @@ struct Mouse {
     info: DevInfo,
     instance: String,
 }
-// Install searches present devices. Rollback can find a disconnected node by
-// its saved instance ID. More than one match is refused rather than guessed.
-fn mouse(saved: Option<&str>) -> Result<Mouse> {
+fn device_set(present_only: bool) -> Result<DeviceSet> {
     let set = DeviceSet(unsafe {
         SetupDiGetClassDevsW(
             null(),
             null(),
             null_mut(),
-            DIGCF_ALLCLASSES | if saved.is_some() { 0 } else { DIGCF_PRESENT },
+            DIGCF_ALLCLASSES | if present_only { DIGCF_PRESENT } else { 0 },
         )
     });
     if set.0 as isize == -1 {
         return Err(io::Error::last_os_error().into());
     }
-    let mut found = None;
+    Ok(set)
+}
+
+fn enumerate(set: &DeviceSet) -> Result<Vec<(DevInfo, String)>> {
+    let mut found = Vec::new();
     for index in 0.. {
         let mut info: DevInfo = unsafe { zeroed() };
         info.cbSize = size_of::<DevInfo>() as u32;
@@ -435,25 +530,249 @@ fn mouse(saved: Option<&str>) -> Result<Mouse> {
             return Err(fail("Invalid device ID size"));
         }
         let instance = String::from_utf16(&id[..needed as usize - 1])?;
-        if !validate_instance(&instance)
-            || saved.is_some_and(|s| !s.eq_ignore_ascii_case(&instance))
-        {
+        if !validate_instance(&instance) {
             continue;
         }
-        if found.is_some() {
-            return Err(fail(
-                "Multiple target mice found; no automatic choice is made",
-            ));
-        }
-        found = Some((info, instance));
+        found.push((info, instance));
     }
-    let (info, instance) =
-        found.ok_or_else(|| fail("The exact PID 0323 Bluetooth HID mouse node was not found"))?;
+    Ok(found)
+}
+
+fn mouse(instance: &str) -> Result<Mouse> {
+    let set = device_set(false)?;
+    let mut matches = enumerate(&set)?
+        .into_iter()
+        .filter(|(_, id)| id.eq_ignore_ascii_case(instance));
+    let (info, instance) = matches
+        .next()
+        .ok_or_else(|| fail("The selected mouse device node was not found"))?;
+    if matches.next().is_some() {
+        return Err(fail("Duplicate mouse device instance ID"));
+    }
     Ok(Mouse {
         set,
         info,
         instance,
     })
+}
+
+#[derive(Clone, Debug)]
+pub struct MouseChoice {
+    instance: String,
+    present: bool,
+    installed: bool,
+    tracked: bool,
+    attached: bool,
+}
+
+fn present_instances() -> Result<Vec<String>> {
+    Ok(enumerate(&device_set(true)?)?
+        .into_iter()
+        .map(|(_, instance)| instance)
+        .collect())
+}
+
+fn contains_instance(instances: &[String], instance: &str) -> bool {
+    instances.iter().any(|id| id.eq_ignore_ascii_case(instance))
+}
+
+pub fn choices(journal: &Path) -> Result<Vec<MouseChoice>> {
+    let state = if journal.try_exists()? {
+        Some(load_state(journal)?)
+    } else {
+        None
+    };
+    let present = present_instances()?;
+    let set = device_set(false)?;
+    let mut choices = Vec::new();
+    for (_, instance) in enumerate(&set)? {
+        let tracked = state.as_ref().is_some_and(|state| {
+            state.devices.iter().any(|device| {
+                device.filter_added && device.instance.eq_ignore_ascii_case(&instance)
+            })
+        });
+        let attached = filters(&mouse(&instance)?)?
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(SERVICE));
+        choices.push(MouseChoice {
+            present: contains_instance(&present, &instance),
+            installed: attached || tracked,
+            tracked,
+            attached,
+            instance,
+        });
+    }
+    choices.sort_by(|a, b| {
+        a.instance
+            .to_ascii_lowercase()
+            .cmp(&b.instance.to_ascii_lowercase())
+    });
+    Ok(choices)
+}
+
+fn choice_option(index: usize, choice: &MouseChoice) -> (String, u16) {
+    let status = match (choice.tracked, choice.attached) {
+        (true, true) => "attached; tracked here",
+        (true, false) => "not attached; tracked here; filter missing",
+        (false, true) => "already attached; not tracked here",
+        (false, false) => "not attached",
+    };
+    (
+        format!(
+            "{}. {} [{status}]\n   {}",
+            index + 1,
+            if choice.present {
+                "Present in Windows"
+            } else {
+                "Not currently present in Windows"
+            },
+            choice.instance
+        ),
+        if choice.attached {
+            FOREGROUND_GREEN
+        } else {
+            FOREGROUND_RED
+        },
+    )
+}
+
+pub fn show_choices(choices: &[MouseChoice]) -> Result<()> {
+    for (index, choice) in choices.iter().enumerate() {
+        let (text, foreground) = choice_option(index, choice);
+        print_colored_line(&text, foreground)?;
+    }
+    print_cyan_option(&format!(
+        "{}. Install for all eligible mice (already attached or tracked entries are skipped)",
+        choices.len() + 1
+    ))?;
+    println!("0. Return to main menu");
+    Ok(())
+}
+
+pub fn select_choices(choices: &[MouseChoice], answer: &str) -> Result<Vec<String>> {
+    let all = answer.eq_ignore_ascii_case("all")
+        || answer.parse::<usize>().ok() == Some(choices.len() + 1);
+    let selected: Vec<_> = if all {
+        choices.iter().filter(|choice| !choice.installed).collect()
+    } else {
+        let index: usize = answer
+            .parse()
+            .map_err(|_| fail("Choose a displayed number or ALL"))?;
+        let choice = index
+            .checked_sub(1)
+            .and_then(|index| choices.get(index))
+            .ok_or("Choose a displayed number or ALL")?;
+        if choice.installed {
+            return Err(fail("That mouse is already installed"));
+        }
+        vec![choice]
+    };
+    if selected.is_empty() {
+        return Err(fail("No new mice available to install"));
+    }
+    Ok(selected
+        .into_iter()
+        .map(|choice| choice.instance.clone())
+        .collect())
+}
+
+pub struct RemovalChoice {
+    instance: String,
+    present: bool,
+    attached: Option<bool>,
+}
+
+pub enum RemovalSelection {
+    One(String),
+    All,
+}
+
+pub fn removal_choices(journal: &Path) -> Result<Vec<RemovalChoice>> {
+    if !journal.try_exists()? {
+        return Err(fail("No removal journal was found in this setup folder. Use the folder that recorded the installation."));
+    }
+    let state = load_state(journal)?;
+    let present = present_instances()?;
+    let instances: Vec<_> = enumerate(&device_set(false)?)?
+        .into_iter()
+        .map(|(_, instance)| instance)
+        .collect();
+    let mut choices = Vec::new();
+    for device in state.devices.iter().filter(|device| device.filter_added) {
+        let attached = if contains_instance(&instances, &device.instance) {
+            Some(
+                filters(&mouse(&device.instance)?)?
+                    .iter()
+                    .any(|entry| entry.eq_ignore_ascii_case(SERVICE)),
+            )
+        } else {
+            None
+        };
+        choices.push(RemovalChoice {
+            present: contains_instance(&present, &device.instance),
+            attached,
+            instance: device.instance.clone(),
+        });
+    }
+    Ok(choices)
+}
+
+pub fn show_removal_choices(choices: &[RemovalChoice]) -> Result<()> {
+    for (index, choice) in choices.iter().enumerate() {
+        let (status, color) = match choice.attached {
+            Some(true) => ("attached", FOREGROUND_GREEN),
+            Some(false) => ("filter missing; retry removal", FOREGROUND_RED),
+            None => (
+                "device node missing; removal requires the node",
+                FOREGROUND_RED,
+            ),
+        };
+        print_colored_line(
+            &format!(
+                "{}. {} [{status}]\n   {}",
+                index + 1,
+                if choice.present {
+                    "Present in Windows"
+                } else {
+                    "Not currently present in Windows"
+                },
+                choice.instance
+            ),
+            color,
+        )?;
+    }
+    print_cyan_option(&format!(
+        "{}. Remove all recorded mice and owned shared components",
+        choices.len() + 1
+    ))?;
+    println!("0. Return to main menu");
+    Ok(())
+}
+
+pub fn select_removal(choices: &[RemovalChoice], answer: &str) -> Result<RemovalSelection> {
+    if answer.eq_ignore_ascii_case("all") || answer.parse::<usize>().ok() == Some(choices.len() + 1)
+    {
+        return Ok(RemovalSelection::All);
+    }
+    let index: usize = answer
+        .parse()
+        .map_err(|_| fail("Choose a displayed number or ALL"))?;
+    let choice = index
+        .checked_sub(1)
+        .and_then(|index| choices.get(index))
+        .ok_or("Choose a displayed number or ALL")?;
+    Ok(RemovalSelection::One(choice.instance.clone()))
+}
+
+fn restart_if_present(mouse: &Mouse) -> Result<()> {
+    if contains_instance(&present_instances()?, &mouse.instance) {
+        restart(mouse)?;
+    } else {
+        println!(
+            "Device is not currently present; its filter change takes effect when it reconnects."
+        );
+    }
+    Ok(())
 }
 // REG_MULTI_SZ is a list of UTF-16 strings ending in a double NUL. Validate
 // that termination before editing, so malformed properties are not overwritten.
@@ -567,46 +886,235 @@ fn set_filters(mouse: &Mouse, values: &[String]) -> Result<()> {
     }
     Ok(())
 }
-// Own a new installation only. Existing filters, files and services can belong
-// to another package, so neither plan nor install replaces them.
-fn preflight(path: &Path) -> Result<(Audited, Mouse)> {
-    let audited = audit(path)?;
-    let mouse = mouse(None)?;
-    if !filters(&mouse)?.is_empty() {
-        return Err(fail(
-            "An existing lower filter is installed. Refusing to replace or combine drivers.",
-        ));
-    }
-    if destination()?.exists() {
-        return Err(fail(
-            "A system Apple driver file already exists. Refusing to overwrite it.",
-        ));
-    }
-    let manager = manager(SC_MANAGER_CONNECT)?;
-    if service(&manager, SERVICE_QUERY_CONFIG)?.is_some() {
-        return Err(fail(
-            "An Apple mouse service already exists. Refusing to alter it.",
-        ));
-    }
-    Ok((audited, mouse))
+struct Preflight {
+    audited: Audited,
+    mice: Vec<Mouse>,
+    state: Option<State>,
+    reuse: bool,
+    external: bool,
 }
-pub fn plan(path: &Path) -> Result<()> {
-    let (audited, _) = preflight(path)?;
-    println!("Read-only plan ready:\n  Driver: Apple 6.1.7000.0, unchanged, SHA-256 matched\n  Windows kernel signature policy: accepted signature #{}\n  Exact target: Apple Bluetooth HID PID 0323 (device identifiers omitted)\n  No existing service, driver file, or lower-filter conflict\n  Basic PE memory checks: passed (not proof of HVCI compatibility)\n\nProposed administrator actions:\n  1. Save a local rollback journal\n  2. Copy the verified driver to {}\n  3. Create and start the {} kernel service\n  4. Abort and roll back if Windows refuses to load it\n  5. Attach only to the target mouse and restart that device\n\nSecure Boot, Memory Integrity, test-signing, certificate stores, and INF files stay unchanged.\nUSB-C scrolling is unverified until a physical test.",audited.signature,destination()?.display(),SERVICE);
+
+fn reuse_existing(file_exists: bool, service_exists: bool, has_journal: bool) -> Result<bool> {
+    match (file_exists, service_exists, has_journal) {
+        (true, true, _) => Ok(true),
+        (false, false, false) => Ok(false),
+        _ => Err(fail("The existing driver file and service are incomplete or inconsistent; refusing to alter them.")),
+    }
+}
+
+fn check_journal_for_install(state: &State) -> Result<()> {
+    if !state.external_shared && (!state.file_created || !state.service_created) {
+        return Err(fail("The existing journal does not describe a complete installation. Remove or recover it before adding mice."));
+    }
+    if state.devices.iter().any(|device| !device.filter_added) {
+        return Err(fail("The existing journal records an incomplete device attachment. Remove or recover it before adding mice."));
+    }
     Ok(())
 }
 
-// Record ownership: rollback removes only things this transaction created.
-// The device identity is private, so this journal stays on the user's machine.
+fn preflight(path: &Path, journal: &Path, selected: &[String]) -> Result<Preflight> {
+    if selected.is_empty() {
+        return Err(fail("No new mice selected"));
+    }
+    if journal.with_extension("pending.json").try_exists()? {
+        return Err(fail("A pending journal exists. Preserve it and resolve the previous incomplete operation before continuing."));
+    }
+    let manager = manager(SC_MANAGER_CONNECT)?;
+    let destination = destination()?;
+    let state = if journal.try_exists()? {
+        let state = load_state(journal)?;
+        check_journal_for_install(&state)?;
+        for device in state.devices.iter().filter(|device| device.filter_added) {
+            let current = filters(&mouse(&device.instance)?)?;
+            if !current
+                .iter()
+                .any(|entry| entry.eq_ignore_ascii_case(SERVICE))
+            {
+                return Err(fail("An installed mouse no longer has the recorded filter. Remove or recover the installation first."));
+            }
+        }
+        Some(state)
+    } else {
+        None
+    };
+    let existing_file = destination.try_exists()?;
+    let existing_service = service(&manager, SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS)?;
+    let reuse = reuse_existing(existing_file, existing_service.is_some(), state.is_some())?;
+    let external = state.as_ref().map_or(reuse, |state| state.external_shared);
+    let audited = if reuse {
+        let service = existing_service.as_ref().ok_or("Driver service missing")?;
+        if !service_binary_matches(&service_binary(service)?, &destination) {
+            return Err(fail(
+                "The existing service points to a different driver; refusing to reuse it",
+            ));
+        }
+        let current = status(service)?.dwCurrentState;
+        if current != SERVICE_RUNNING && current != SERVICE_STOPPED {
+            return Err(fail(
+                "The driver service is changing state. Try again when it has stopped or started.",
+            ));
+        }
+        audit(&destination)?
+    } else {
+        audit(path)?
+    };
+    let mut mice = Vec::new();
+    for (index, instance) in selected.iter().enumerate() {
+        if !validate_instance(instance) || contains_instance(&selected[..index], instance) {
+            return Err(fail("Invalid or duplicate selected mouse"));
+        }
+        if state.as_ref().is_some_and(|state| {
+            state
+                .devices
+                .iter()
+                .any(|device| device.instance.eq_ignore_ascii_case(instance))
+        }) {
+            return Err(fail("A selected mouse is already recorded in the journal"));
+        }
+        let mouse = mouse(instance)?;
+        if !filters(&mouse)?.is_empty() {
+            return Err(fail("A selected mouse already has a lower filter. Refusing to replace or combine drivers."));
+        }
+        mice.push(mouse);
+    }
+    Ok(Preflight {
+        audited,
+        mice,
+        state,
+        reuse,
+        external,
+    })
+}
+
+pub fn check_download(path: &Path) -> Result<()> {
+    let audited = audit(path)?;
+    println!("Driver verified; Windows accepted signature #{}. Choose Install to select mice and review the plan.", audited.signature);
+    Ok(())
+}
+
+pub fn plan_selected(path: &Path, journal: &Path, selected: &[String]) -> Result<()> {
+    let plan = preflight(path, journal, selected)?;
+    println!("Read-only plan ready:\n  Driver: Apple 6.1.7000.0, unchanged, SHA-256 matched\n  Windows kernel signature policy: accepted signature #{}\n  Selected mouse nodes: {}\n  Shared driver: {}\n\nProposed administrator actions:\n  Save a local rollback journal, {} the shared driver service,\n  attach the filter to each selected mouse and restart those present in Windows.\n  Disconnected mice need testing after reconnection.\n\nSecure Boot, Memory Integrity, test-signing, certificate stores, and INF files stay unchanged.\nScrolling is unverified until a physical test.",plan.audited.signature,plan.mice.len(),destination()?.display(),if plan.reuse { "reuse and start if needed" } else { "create and start" });
+    if plan.external {
+        println!("\nThe existing driver and service are not owned by this journal. Removal will leave them and previously attached mice unchanged.");
+    }
+    Ok(())
+}
+
+fn single_present() -> Result<Vec<String>> {
+    let present = present_instances()?;
+    match present.len() {
+        0 => Err(fail(
+            "The exact PID 0323 Bluetooth HID mouse node was not found",
+        )),
+        1 => Ok(present),
+        _ => Err(fail(
+            "Multiple target mice found; use the guided menu to select mice",
+        )),
+    }
+}
+
+pub fn plan(path: &Path) -> Result<()> {
+    // The CLI plan uses the guided setup's journal when it exists.
+    let journal = std::env::current_exe()?.with_file_name("magic-scroll.state.json");
+    plan_selected(path, &journal, &single_present()?)
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct State {
+    version: u32,
+    hash: String,
+    file_created: bool,
+    service_created: bool,
+    #[serde(default)]
+    external_shared: bool,
+    devices: Vec<DeviceState>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeviceState {
+    instance: String,
+    filter_added: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyState {
     version: u32,
     hash: String,
     instance: String,
     file_created: bool,
     service_created: bool,
     filter_added: bool,
+}
+
+fn decode_state(bytes: &[u8]) -> Result<State> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let state = match value.get("version").and_then(|v| v.as_u64()) {
+        Some(1) => {
+            let legacy: LegacyState = serde_json::from_value(value)?;
+            if legacy.version != 1 {
+                return Err(fail("Invalid legacy journal version"));
+            }
+            State {
+                version: 3,
+                hash: legacy.hash,
+                file_created: legacy.file_created,
+                service_created: legacy.service_created,
+                external_shared: false,
+                devices: vec![DeviceState {
+                    instance: legacy.instance,
+                    filter_added: legacy.filter_added,
+                }],
+            }
+        }
+        Some(2) => {
+            let mut state: State = serde_json::from_value(value)?;
+            if state.external_shared {
+                return Err(fail("Invalid version 2 rollback journal"));
+            }
+            state.version = 3;
+            state
+        }
+        Some(3) => serde_json::from_value(value)?,
+        _ => return Err(fail("Invalid or unsupported rollback journal version")),
+    };
+    validate_state(&state)?;
+    Ok(state)
+}
+
+fn validate_state(state: &State) -> Result<()> {
+    if state.version != 3
+        || state.hash != HASH
+        || (state.external_shared && (state.file_created || state.service_created))
+    {
+        return Err(fail("Invalid or unsupported rollback journal"));
+    }
+    for (index, device) in state.devices.iter().enumerate() {
+        if !validate_instance(&device.instance)
+            || state.devices[..index]
+                .iter()
+                .any(|previous| previous.instance.eq_ignore_ascii_case(&device.instance))
+        {
+            return Err(fail("Invalid or duplicate mouse in rollback journal"));
+        }
+    }
+    Ok(())
+}
+
+fn load_state(journal: &Path) -> Result<State> {
+    let file = File::open(journal)?;
+    if file.metadata()?.len() > 262144 {
+        return Err(fail("Oversized rollback journal"));
+    }
+    let mut bytes = Vec::new();
+    file.take(262145).read_to_end(&mut bytes)?;
+    if bytes.len() > 262144 {
+        return Err(fail("Oversized rollback journal"));
+    }
+    decode_state(&bytes)
 }
 // Sync the next journal image before replacing the previous one. A crash
 // between a system mutation and this save is still an open recovery case;
@@ -650,115 +1158,173 @@ fn status(service: &ScHandle) -> Result<ServiceStatus> {
 }
 
 pub fn install(path: &Path, journal: &Path) -> Result<()> {
+    install_selected(path, journal, &single_present()?)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct InstallActions {
+    create_journal: bool,
+    create_driver: bool,
+}
+
+fn install_actions(has_journal: bool, reuse: bool) -> InstallActions {
+    InstallActions {
+        create_journal: !has_journal,
+        create_driver: !reuse,
+    }
+}
+
+pub fn install_selected(path: &Path, journal: &Path, selected: &[String]) -> Result<()> {
     // Opening SCM with CREATE_SERVICE performs the ordinary administrator access
     // check before creating a journal or touching a system file. No auto-elevation.
     let manager = manager(SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE)?;
-    let (audited, mouse) = preflight(path)?;
-    if journal.exists() || journal.with_extension("pending.json").exists() {
-        return Err(fail("Rollback journal or pending journal already exists"));
-    }
-    let mut state = State {
-        version: 1,
+    let Preflight {
+        audited,
+        mice,
+        state: existing,
+        reuse,
+        external,
+    } = preflight(path, journal, selected)?;
+    let actions = install_actions(existing.is_some(), reuse);
+    let mut state = existing.unwrap_or_else(|| State {
+        version: 3,
         hash: HASH.into(),
-        instance: mouse.instance.clone(),
         file_created: false,
         service_created: false,
-        filter_added: false,
-    };
-    save(journal, &state, true)?;
+        external_shared: external,
+        devices: Vec::new(),
+    });
+    let first_new = state.devices.len();
+    if actions.create_journal {
+        save(journal, &state, true)?;
+    }
     let result = (|| -> Result<()> {
-        let destination = destination()?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)?;
-        state.file_created = true;
-        let written = file
-            .write_all(&audited.bytes)
-            .and_then(|()| file.sync_all());
-        drop(file);
-        if let Err(error) = written {
-            // This path was created exclusively by this running transaction.
-            // Remove a partial copy before leaving it for the persisted rollback path.
-            std::fs::remove_file(&destination)?;
-            state.file_created = false;
-            return Err(error.into());
-        }
-        save(journal, &state, false)?;
-        // Verify the copied file before any kernel load attempt.
-        audit(&destination)?;
-        let name = wide(SERVICE);
-        let display = wide("Apple Wireless Mouse — Magic Scroll setup");
-        let binary = wide(&destination.to_string_lossy());
-        let raw = unsafe {
-            CreateServiceW(
-                manager.0,
-                name.as_ptr(),
-                display.as_ptr(),
-                0x10000
-                    | SERVICE_QUERY_CONFIG
-                    | SERVICE_QUERY_STATUS
-                    | SERVICE_START
-                    | SERVICE_STOP,
-                SERVICE_KERNEL_DRIVER,
-                SERVICE_DEMAND_START,
-                SERVICE_ERROR_NORMAL,
-                binary.as_ptr(),
-                null(),
-                null_mut(),
-                null(),
-                null(),
-                null(),
-            )
-        };
-        if raw.is_null() {
-            return Err(io::Error::last_os_error().into());
-        }
-        let service = ScHandle(raw);
-        state.service_created = true;
-        save(journal, &state, false)?;
-        // Windows must accept the driver under its current security policy
-        // before we change the mouse binding. Refusal keeps that binding intact.
-        if unsafe { StartServiceW(service.0, 0, null()) } == 0 {
-            return Err(fail(format!(
-                "Windows refused to start the unchanged driver: {}",
-                io::Error::last_os_error()
-            )));
-        }
-        if status(&service)?.dwCurrentState != SERVICE_RUNNING {
-            return Err(fail(
-                "Driver did not reach RUNNING; device filter was not changed",
-            ));
+        if actions.create_driver {
+            let destination = destination()?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&destination)?;
+            state.file_created = true;
+            let written = file
+                .write_all(&audited.bytes)
+                .and_then(|()| file.sync_all());
+            drop(file);
+            if let Err(error) = written {
+                // This path was created exclusively by this running transaction.
+                // Remove a partial copy before leaving it for the persisted rollback path.
+                std::fs::remove_file(&destination)?;
+                state.file_created = false;
+                return Err(error.into());
+            }
+            save(journal, &state, false)?;
+            // Verify the copied file before any kernel load attempt.
+            audit(&destination)?;
+            let name = wide(SERVICE);
+            let display = wide("Apple Wireless Mouse — Magic Scroll setup");
+            let binary = wide(&destination.to_string_lossy());
+            let raw = unsafe {
+                CreateServiceW(
+                    manager.0,
+                    name.as_ptr(),
+                    display.as_ptr(),
+                    0x10000
+                        | SERVICE_QUERY_CONFIG
+                        | SERVICE_QUERY_STATUS
+                        | SERVICE_START
+                        | SERVICE_STOP,
+                    SERVICE_KERNEL_DRIVER,
+                    SERVICE_DEMAND_START,
+                    SERVICE_ERROR_NORMAL,
+                    binary.as_ptr(),
+                    null(),
+                    null_mut(),
+                    null(),
+                    null(),
+                    null(),
+                )
+            };
+            if raw.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            let service = ScHandle(raw);
+            state.service_created = true;
+            save(journal, &state, false)?;
+            // Windows must accept the driver under its current security policy
+            // before we change the mouse binding. Refusal keeps that binding intact.
+            if unsafe { StartServiceW(service.0, 0, null()) } == 0 {
+                return Err(fail(format!(
+                    "Windows refused to start the unchanged driver: {}",
+                    io::Error::last_os_error()
+                )));
+            }
+            if status(&service)?.dwCurrentState != SERVICE_RUNNING {
+                return Err(fail(
+                    "Driver did not reach RUNNING; device filter was not changed",
+                ));
+            }
+        } else {
+            let service = service(&manager, SERVICE_QUERY_STATUS | SERVICE_START)?
+                .ok_or("The existing driver service disappeared")?;
+            if status(&service)?.dwCurrentState == SERVICE_STOPPED
+                && unsafe { StartServiceW(service.0, 0, null()) } == 0
+            {
+                return Err(fail(format!(
+                    "Windows refused to start the existing driver: {}",
+                    io::Error::last_os_error()
+                )));
+            }
+            if status(&service)?.dwCurrentState != SERVICE_RUNNING {
+                return Err(fail("The existing driver did not reach RUNNING"));
+            }
         }
         // Another installer could have changed this since preflight: recheck
         // immediately before writing rather than overwrite its changes.
-        if !filters(&mouse)?.is_empty() {
-            return Err(fail(
-                "Mouse filter state changed during installation; refusing to overwrite it",
-            ));
+        for mouse in &mice {
+            if !filters(mouse)?.is_empty() {
+                return Err(fail(
+                    "Mouse filter state changed during installation; refusing to overwrite it",
+                ));
+            }
+            set_filters(mouse, &[SERVICE.into()])?;
+            state.devices.push(DeviceState {
+                instance: mouse.instance.clone(),
+                filter_added: true,
+            });
+            save(journal, &state, false)?;
+            restart_if_present(mouse)?;
+            if filters(mouse)? != vec![SERVICE.to_owned()] {
+                return Err(fail("Device filter verification failed"));
+            }
         }
-        set_filters(&mouse, &[SERVICE.into()])?;
-        state.filter_added = true;
-        save(journal, &state, false)?;
-        restart(&mouse)?;
+        let service =
+            service(&manager, SERVICE_QUERY_STATUS)?.ok_or("Driver service disappeared")?;
         if status(&service)?.dwCurrentState != SERVICE_RUNNING {
             return Err(fail("Driver is not RUNNING after device restart"));
         }
-        if filters(&mouse)? != vec![SERVICE.to_owned()] {
-            return Err(fail("Device filter verification failed"));
-        }
-        println!("Driver loaded and bound. Physical scrolling, clicks, movement and reconnect still require testing. Rollback journal: {}",journal.display());
+        println!("Driver bound to {} mouse node(s). Physical scrolling, clicks, movement and reconnect still require testing. Rollback journal: {}",mice.len(),journal.display());
         Ok(())
     })();
     if let Err(error) = result {
         eprintln!("Installation failed: {error}. Attempting rollback of only this transaction.");
-        match undo(&mut state) {
+        let rollback = if actions.create_journal {
+            undo(&mut state)
+        } else {
+            let result = undo_devices(&mut state, first_new);
+            if result.is_ok() {
+                state.devices.truncate(first_new);
+            }
+            result
+        };
+        match rollback {
             Ok(()) => {
                 save(journal, &state, false)?;
                 eprintln!("Transaction rolled back.");
             }
             Err(e) => {
-                let _ = save(journal, &state, false);
+                if let Err(save_error) = save(journal, &state, false) {
+                    eprintln!("Could not save rollback progress: {save_error}. Preserve the journal and any pending journal.");
+                }
                 eprintln!(
                     "Rollback incomplete: {e}. Preserve the journal; a restart may be needed."
                 );
@@ -804,16 +1370,26 @@ fn service_binary(service: &ScHandle) -> Result<String> {
         .ok_or_else(|| fail("Unterminated service binary path"))?;
     Ok(String::from_utf16(&chars[..end])?)
 }
+
+fn service_binary_matches(binary: &str, destination: &Path) -> bool {
+    binary
+        .strip_prefix(r"\??\")
+        .unwrap_or(binary)
+        .eq_ignore_ascii_case(&destination.to_string_lossy())
+}
+
 fn undo(state: &mut State) -> Result<()> {
     // Validate everything before modifying anything during rollback.
-    if state.version != 1 || state.hash != HASH || !validate_instance(&state.instance) {
-        return Err(fail("Invalid or unsupported rollback journal"));
-    }
-    let manager = manager(SC_MANAGER_CONNECT)?;
-    let service = service(
-        &manager,
-        0x10000 | SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_STOP,
-    )?;
+    validate_state(state)?;
+    let service = if state.service_created {
+        let manager = manager(SC_MANAGER_CONNECT)?;
+        service(
+            &manager,
+            0x10000 | SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_STOP,
+        )?
+    } else {
+        None
+    };
     let destination = destination()?;
     // A newly revoked or blocked signature must not prevent removal of our
     // own byte-identical file. Rollback verifies ownership by the pinned hash.
@@ -824,25 +1400,37 @@ fn undo(state: &mut State) -> Result<()> {
     }
     if state.service_created {
         if let Some(ref s) = service {
-            if !service_binary(s)?.eq_ignore_ascii_case(&destination.to_string_lossy()) {
+            if !service_binary_matches(&service_binary(s)?, &destination) {
                 return Err(fail(
                     "Service binary path changed. Refusing to delete another installation.",
                 ));
             }
         }
+        for (_, instance) in enumerate(&device_set(false)?)? {
+            if !state
+                .devices
+                .iter()
+                .any(|device| device.instance.eq_ignore_ascii_case(&instance))
+                && filters(&mouse(&instance)?)?
+                    .iter()
+                    .any(|entry| entry.eq_ignore_ascii_case(SERVICE))
+            {
+                return Err(fail("Another matching mouse uses this service but is not in the journal. Refusing to remove the shared driver."));
+            }
+        }
     }
-    // Detach and restart before unloading the driver and removing its file.
-    // Preserve any unrelated filter entries added after this installation.
-    if state.filter_added {
-        let mouse = mouse(Some(&state.instance))?;
-        let mut current = filters(&mouse)?;
-        current.retain(|f| !f.eq_ignore_ascii_case(SERVICE));
-        set_filters(&mouse, &current)?;
-        // Remains marked until the native device has restarted successfully.
-        restart(&mouse)?;
-        state.filter_added = false;
-    }
+    undo_devices(state, 0)?;
     if state.service_created {
+        for (_, instance) in enumerate(&device_set(false)?)? {
+            if filters(&mouse(&instance)?)?
+                .iter()
+                .any(|entry| entry.eq_ignore_ascii_case(SERVICE))
+            {
+                return Err(fail(
+                    "A matching mouse still uses the shared driver. Refusing to unload it.",
+                ));
+            }
+        }
         if let Some(ref service) = service {
             if status(service)?.dwCurrentState != SERVICE_STOPPED {
                 let mut result: ServiceStatus = unsafe { zeroed() };
@@ -873,16 +1461,97 @@ fn undo(state: &mut State) -> Result<()> {
     }
     Ok(())
 }
-pub fn rollback(journal: &Path) -> Result<()> {
-    let file = File::open(journal)?;
-    if file.metadata()?.len() > 16384 {
-        return Err(fail("Oversized rollback journal"));
+
+fn undo_devices(state: &mut State, first: usize) -> Result<()> {
+    // Keep the shared service until every recorded attachment is removed.
+    undo_recorded_devices(state, first, detach_mouse)
+}
+
+fn detach_mouse(instance: &str) -> Result<()> {
+    let mouse = mouse(instance)?;
+    let mut current = filters(&mouse)?;
+    current.retain(|f| !f.eq_ignore_ascii_case(SERVICE));
+    set_filters(&mouse, &current)?;
+    restart_if_present(&mouse)
+}
+
+fn undo_recorded_devices(
+    state: &mut State,
+    first: usize,
+    mut detach: impl FnMut(&str) -> Result<()>,
+) -> Result<()> {
+    for device in state.devices[first..].iter_mut().rev() {
+        if device.filter_added {
+            detach(&device.instance)?;
+            device.filter_added = false;
+        }
     }
-    let mut state: State = serde_json::from_reader(file.take(16385))?;
+    Ok(())
+}
+
+fn remove_recorded_device(
+    state: &mut State,
+    instance: &str,
+    detach: impl FnOnce(&str) -> Result<()>,
+    persist: impl FnOnce(&State) -> Result<()>,
+) -> Result<()> {
+    validate_state(state)?;
+    let index = state
+        .devices
+        .iter()
+        .position(|device| device.filter_added && device.instance.eq_ignore_ascii_case(instance))
+        .ok_or("The selected mouse is not recorded as attached in this journal")?;
+    detach(&state.devices[index].instance).map_err(|error| {
+        fail(format!("Could not finish removing the mouse: {error}. The journal still records it; preserve the journal and retry removal."))
+    })?;
+    let removed = state.devices.remove(index);
+    if let Err(error) = persist(state) {
+        state.devices.insert(index, removed);
+        return Err(fail(format!("The mouse was detached, but updating the journal failed: {error}. Preserve the journal and any pending journal for recovery.")));
+    }
+    Ok(())
+}
+
+pub fn remove_selected(journal: &Path, selection: RemovalSelection) -> Result<()> {
+    match selection {
+        RemovalSelection::All => rollback(journal),
+        RemovalSelection::One(instance) => {
+            if journal.with_extension("pending.json").try_exists()? {
+                return Err(fail("A pending journal exists. Preserve it and resolve the previous incomplete operation before continuing."));
+            }
+            let mut state = load_state(journal)?;
+            let destination = destination()?;
+            if destination.try_exists()? && file_hash(&destination)? != HASH {
+                return Err(fail("The shared driver file changed. Refusing to detach a potentially unrelated filter."));
+            }
+            let manager = manager(SC_MANAGER_CONNECT)?;
+            if let Some(service) = service(&manager, SERVICE_QUERY_CONFIG)? {
+                if !service_binary_matches(&service_binary(&service)?, &destination) {
+                    return Err(fail("The shared service points to a different driver. Refusing to detach a potentially unrelated filter."));
+                }
+            }
+            remove_recorded_device(&mut state, &instance, detach_mouse, |state| {
+                save(journal, state, false)
+            })?;
+            println!("The selected mouse was removed. The shared driver and service remain in place; use Remove all to clean up owned shared components.");
+            Ok(())
+        }
+    }
+}
+
+pub fn rollback(journal: &Path) -> Result<()> {
+    if !journal.try_exists()? {
+        return Err(fail("No removal journal was found. Existing mouse attachments and drivers cannot safely be removed without their installation records."));
+    }
+    let mut state = load_state(journal)?;
     let result = undo(&mut state);
     save(journal, &state, false)?;
     result?;
-    println!("This installation was removed. Unrelated filter entries were preserved.");
+    if state.external_shared {
+        println!("Recorded mouse attachments were removed. The existing shared driver and service were left in place.");
+    } else {
+        println!("This installation was removed. Unrelated filter entries were preserved.");
+    }
     Ok(())
 }
 
@@ -905,6 +1574,375 @@ mod tests {
             assert_eq!(hex_hash(&Sha256::digest(input.as_bytes())), expected);
         }
     }
+
+    #[test]
+    fn administrator_options_indicate_effective_privileges() {
+        let (elevated, elevated_color) = administrator_option(2, "Install", true);
+        assert!(elevated.contains("[running as administrator]"));
+        assert_eq!(elevated_color, FOREGROUND_GREEN);
+        let (unelevated, unelevated_color) = administrator_option(4, "Remove", false);
+        assert!(unelevated.contains("[not running as administrator]"));
+        assert_eq!(unelevated_color, FOREGROUND_RED);
+    }
+
+    #[test]
+    fn service_binary_accepts_windows_kernel_path_prefix_only_for_expected_file() {
+        let expected = Path::new(r"C:\Windows\System32\drivers\applewirelessmouse.sys");
+        assert!(service_binary_matches(
+            r"\??\C:\WINDOWS\system32\drivers\applewirelessmouse.sys",
+            expected
+        ));
+        assert!(service_binary_matches(
+            r"C:\Windows\System32\drivers\applewirelessmouse.sys",
+            expected
+        ));
+        assert!(!service_binary_matches(
+            r"\??\C:\other\applewirelessmouse.sys",
+            expected
+        ));
+    }
+
+    fn choice(suffix: &str, present: bool, installed: bool) -> MouseChoice {
+        MouseChoice {
+            instance: format!("{}\\{suffix}", crate::HARDWARE),
+            present,
+            installed,
+            tracked: installed,
+            attached: installed,
+        }
+    }
+
+    #[test]
+    fn selection_includes_offline_and_skips_installed_mice() {
+        let mut choices = vec![
+            choice("one", true, true),
+            choice("two", false, false),
+            choice("three", true, false),
+        ];
+        choices[0].tracked = false;
+        assert_eq!(
+            select_choices(&choices, "2").unwrap(),
+            vec![choices[1].instance.clone()]
+        );
+        assert_eq!(
+            select_choices(&choices, "all").unwrap(),
+            vec![choices[1].instance.clone(), choices[2].instance.clone()]
+        );
+        assert_eq!(
+            select_choices(&choices, "4").unwrap(),
+            vec![choices[1].instance.clone(), choices[2].instance.clone()]
+        );
+        for invalid in ["0", "1", "5", "-1", "invalid"] {
+            assert!(select_choices(&choices, invalid).is_err());
+        }
+        assert!(select_choices(&choices[..1], "all").is_err());
+        assert!(select_choices(&choices[..1], "2").is_err());
+    }
+
+    #[test]
+    fn mouse_option_color_follows_actual_filter_not_journal() {
+        let mut mouse = choice("one", true, true);
+        assert_eq!(choice_option(0, &mouse).1, FOREGROUND_GREEN);
+        mouse.attached = false;
+        let (text, color) = choice_option(0, &mouse);
+        assert_eq!(color, FOREGROUND_RED);
+        assert!(text.contains("not attached; tracked here; filter missing"));
+        mouse.tracked = false;
+        let (text, color) = choice_option(0, &mouse);
+        assert_eq!(color, FOREGROUND_RED);
+        assert!(text.contains("[not attached]"));
+    }
+
+    #[test]
+    fn removal_menu_selects_one_or_all_recorded_mice() {
+        let choices = vec![
+            RemovalChoice {
+                instance: format!("{}\\one", crate::HARDWARE),
+                present: true,
+                attached: Some(true),
+            },
+            RemovalChoice {
+                instance: format!("{}\\two", crate::HARDWARE),
+                present: false,
+                attached: Some(true),
+            },
+        ];
+        match select_removal(&choices, "2").unwrap() {
+            RemovalSelection::One(instance) => assert_eq!(instance, choices[1].instance),
+            RemovalSelection::All => panic!("Selected all instead of one"),
+        }
+        assert!(matches!(
+            select_removal(&choices, "3").unwrap(),
+            RemovalSelection::All
+        ));
+        assert!(matches!(
+            select_removal(&[], "1").unwrap(),
+            RemovalSelection::All
+        ));
+        for invalid in ["0", "4", "invalid"] {
+            assert!(select_removal(&choices, invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn removing_one_keeps_other_mouse_and_shared_components() {
+        let mut state = State {
+            version: 3,
+            hash: HASH.into(),
+            file_created: true,
+            service_created: true,
+            external_shared: false,
+            devices: ["one", "two"]
+                .into_iter()
+                .map(|suffix| DeviceState {
+                    instance: format!("{}\\{suffix}", crate::HARDWARE),
+                    filter_added: true,
+                })
+                .collect(),
+        };
+        let selected = state.devices[0].instance.clone();
+        let retained = state.devices[1].instance.clone();
+        let mut detached = Vec::new();
+        let mut saved = Vec::new();
+        remove_recorded_device(
+            &mut state,
+            &selected.to_uppercase(),
+            |id| {
+                detached.push(id.to_owned());
+                Ok(())
+            },
+            |state| {
+                saved = serde_json::to_vec(state)?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(detached, vec![selected]);
+        let persisted = decode_state(&saved).unwrap();
+        assert_eq!(persisted.devices.len(), 1);
+        assert_eq!(persisted.devices[0].instance, retained);
+        assert!(persisted.devices[0].filter_added);
+        assert!(persisted.file_created && persisted.service_created);
+        remove_recorded_device(&mut state, &retained, |_| Ok(()), |_| Ok(())).unwrap();
+        assert!(state.devices.is_empty());
+        assert!(state.file_created && state.service_created);
+        assert!(check_journal_for_install(&state).is_ok());
+    }
+
+    #[test]
+    fn failed_individual_removal_keeps_its_journal_record() {
+        let mut state = State {
+            version: 3,
+            hash: HASH.into(),
+            file_created: false,
+            service_created: false,
+            external_shared: true,
+            devices: vec![DeviceState {
+                instance: format!("{}\\one", crate::HARDWARE),
+                filter_added: true,
+            }],
+        };
+        let selected = state.devices[0].instance.clone();
+        assert!(remove_recorded_device(
+            &mut state,
+            &selected,
+            |_| Err(fail("restart failed")),
+            |_| { panic!("Must not save after detach failure") }
+        )
+        .is_err());
+        assert!(state.devices[0].filter_added);
+        assert!(remove_recorded_device(
+            &mut state,
+            &selected,
+            |_| Ok(()),
+            |_| Err(fail("write failed"))
+        )
+        .is_err());
+        assert_eq!(state.devices[0].instance, selected);
+        assert!(state.devices[0].filter_added);
+        assert!(remove_recorded_device(
+            &mut state,
+            "untracked",
+            |_| { panic!("Must not detach an untracked mouse") },
+            |_| Ok(())
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn existing_driver_requires_both_file_and_service() {
+        assert!(reuse_existing(true, true, false).unwrap());
+        assert!(!reuse_existing(false, false, false).unwrap());
+        for (file, service, journal) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            assert!(reuse_existing(file, service, journal).is_err());
+        }
+    }
+
+    #[test]
+    fn new_journal_reuses_existing_driver_without_creating_another() {
+        assert_eq!(
+            install_actions(false, true),
+            InstallActions {
+                create_journal: true,
+                create_driver: false,
+            }
+        );
+        assert_eq!(
+            install_actions(false, false),
+            InstallActions {
+                create_journal: true,
+                create_driver: true,
+            }
+        );
+        assert_eq!(
+            install_actions(true, true),
+            InstallActions {
+                create_journal: false,
+                create_driver: false,
+            }
+        );
+    }
+
+    #[test]
+    fn empty_external_journal_can_retry_but_incomplete_owned_state_cannot() {
+        let mut state = State {
+            version: 3,
+            hash: HASH.into(),
+            file_created: false,
+            service_created: false,
+            external_shared: true,
+            devices: Vec::new(),
+        };
+        assert!(check_journal_for_install(&state).is_ok());
+        state.devices.push(DeviceState {
+            instance: format!("{}\\one", crate::HARDWARE),
+            filter_added: false,
+        });
+        assert!(check_journal_for_install(&state).is_err());
+        state.devices.clear();
+        state.external_shared = false;
+        assert!(check_journal_for_install(&state).is_err());
+    }
+
+    #[test]
+    fn external_journal_never_claims_shared_components() {
+        let id = format!("{}\\external", crate::HARDWARE);
+        let mut state = State {
+            version: 3,
+            hash: HASH.into(),
+            file_created: false,
+            service_created: false,
+            external_shared: true,
+            devices: vec![DeviceState {
+                instance: id,
+                filter_added: true,
+            }],
+        };
+        let decoded = decode_state(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(decoded.external_shared);
+        assert!(!decoded.file_created && !decoded.service_created);
+        state.service_created = true;
+        assert!(validate_state(&state).is_err());
+        state.service_created = false;
+        state.file_created = true;
+        assert!(validate_state(&state).is_err());
+    }
+
+    #[test]
+    fn legacy_journal_migrates_and_keeps_ownership() {
+        let id = format!("{}\\legacy", crate::HARDWARE);
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "version": 1, "hash": HASH, "instance": id,
+            "file_created": true, "service_created": true, "filter_added": true
+        }))
+        .unwrap();
+        let state = decode_state(&bytes).unwrap();
+        assert!(state.file_created && state.service_created);
+        assert_eq!(state.devices.len(), 1);
+        assert_eq!(state.devices[0].instance, id);
+        assert!(state.devices[0].filter_added);
+        let round_trip = decode_state(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(round_trip.devices[0].instance, id);
+    }
+
+    #[test]
+    fn rejects_invalid_and_duplicate_journal_devices() {
+        let id = format!("{}\\device", crate::HARDWARE);
+        let journal = |devices: serde_json::Value| {
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2, "hash": HASH, "file_created": true,
+                "service_created": true, "devices": devices
+            }))
+            .unwrap()
+        };
+        assert!(decode_state(&journal(serde_json::json!([
+            {"instance": id, "filter_added": true},
+            {"instance": id.to_uppercase(), "filter_added": true}
+        ])))
+        .is_err());
+        assert!(decode_state(&journal(serde_json::json!([
+            {"instance": "not-a-mouse", "filter_added": true}
+        ])))
+        .is_err());
+    }
+
+    #[test]
+    fn incremental_rollback_preserves_existing_mice_and_retries_failed_detach() {
+        let mut state = State {
+            version: 3,
+            hash: HASH.into(),
+            file_created: true,
+            service_created: true,
+            external_shared: false,
+            devices: ["old", "new1", "new2"]
+                .into_iter()
+                .map(|suffix| DeviceState {
+                    instance: format!("{}\\{suffix}", crate::HARDWARE),
+                    filter_added: true,
+                })
+                .collect(),
+        };
+        let mut attempted = Vec::new();
+        let result = undo_recorded_devices(&mut state, 1, |instance| {
+            attempted.push(instance.to_owned());
+            if instance.ends_with("new1") {
+                Err(fail("restart failed"))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(attempted.len(), 2);
+        assert!(state.devices[0].filter_added);
+        assert!(state.devices[1].filter_added);
+        assert!(!state.devices[2].filter_added);
+        assert!(state.file_created && state.service_created);
+
+        attempted.clear();
+        undo_recorded_devices(&mut state, 1, |instance| {
+            attempted.push(instance.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(attempted, vec![state.devices[1].instance.clone()]);
+        assert!(state.devices[0].filter_added);
+        assert!(!state.devices[1].filter_added && !state.devices[2].filter_added);
+    }
+
+    #[test]
+    fn download_option_reports_presence_with_matching_color() {
+        let (missing, missing_color) = download_option(false);
+        assert!(missing.contains("[not downloaded]"));
+        assert_eq!(missing_color, FOREGROUND_RED);
+        let (present, present_color) = download_option(true);
+        assert!(present.contains("[downloaded]"));
+        assert_eq!(present_color, FOREGROUND_GREEN);
+    }
+
     #[test]
     fn multisz_roundtrip_and_validation() {
         for values in [vec![], vec!["one".into()], vec!["one".into(), "two".into()]] {
